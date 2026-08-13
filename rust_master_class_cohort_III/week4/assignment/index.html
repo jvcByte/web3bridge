@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Week 4 Assignment — Book Library API</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Courier+Prime:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        @keyframes scanlines {
+            0% { transform: translateY(0); }
+            100% { transform: translateY(10px); }
+        }
+
+        @keyframes flicker {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.97; }
+        }
+
+        body {
+            font-family: 'Courier Prime', monospace;
+            line-height: 1.6;
+            color: #ff6b35;
+            background: #0a0e27;
+            padding: 20px;
+            position: relative;
+            overflow-x: hidden;
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: repeating-linear-gradient(
+                0deg,
+                rgba(0, 0, 0, 0.15) 0px,
+                rgba(0, 0, 0, 0.15) 1px,
+                transparent 1px,
+                transparent 2px
+            );
+            pointer-events: none;
+            animation: scanlines 8s linear infinite;
+            z-index: 1;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: rgba(20, 20, 40, 0.95);
+            border: 2px solid #ff6b35;
+            box-shadow: 
+                0 0 20px rgba(255, 107, 53, 0.3),
+                inset 0 0 20px rgba(255, 107, 53, 0.1);
+            overflow: hidden;
+            position: relative;
+            z-index: 2;
+            animation: flicker 0.15s infinite;
+        }
+
+        .header {
+            background: linear-gradient(90deg, rgba(255, 107, 53, 0.1) 0%, rgba(255, 107, 53, 0.05) 100%);
+            border-bottom: 2px solid #ff6b35;
+            padding: 50px 40px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .header::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: radial-gradient(circle at 20% 50%, rgba(255, 107, 53, 0.1) 0%, transparent 50%);
+            pointer-events: none;
+        }
+
+        .header h1 {
+            font-size: 2.8em;
+            margin-bottom: 10px;
+            color: #ff6b35;
+            text-shadow: 0 0 10px rgba(255, 107, 53, 0.5);
+            letter-spacing: 2px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .header h1::first-line {
+            color: #ff6b35;
+        }
+
+        .header p {
+            font-size: 1em;
+            color: #888;
+            position: relative;
+            z-index: 1;
+            letter-spacing: 1px;
+        }
+
+        .content {
+            padding: 50px 40px;
+            position: relative;
+            z-index: 3;
+        }
+
+        /* Markdown Styles */
+        #markdown-content h2 {
+            margin-top: 50px;
+            margin-bottom: 25px;
+            padding-bottom: 15px;
+            border-bottom: 2px dashed #ff6b35;
+            font-size: 1.8em;
+            color: #ff6b35;
+            text-shadow: 0 0 10px rgba(255, 107, 53, 0.3);
+            letter-spacing: 1px;
+        }
+
+        #markdown-content h2::before {
+            content: '> ';
+            color: #ff6b35;
+        }
+
+        #markdown-content h3 {
+            margin-top: 35px;
+            margin-bottom: 15px;
+            font-size: 1.3em;
+            color: #ffb84d;
+            letter-spacing: 0.5px;
+        }
+
+        #markdown-content h3::before {
+            content: ':: ';
+            color: #ff6b35;
+        }
+
+        #markdown-content h4 {
+            margin-top: 20px;
+            margin-bottom: 10px;
+            font-size: 1em;
+            color: #ff6b35;
+        }
+
+        #markdown-content p {
+            margin-bottom: 15px;
+            color: #ccc;
+            line-height: 1.7;
+        }
+
+        #markdown-content ul,
+        #markdown-content ol {
+            margin-left: 30px;
+            margin-bottom: 15px;
+        }
+
+        #markdown-content li {
+            margin-bottom: 10px;
+            color: #ccc;
+        }
+
+        #markdown-content li::marker {
+            color: #ff6b35;
+        }
+
+        #markdown-content table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+            font-size: 0.95em;
+            border: 1px solid #ff6b35;
+        }
+
+        #markdown-content table th,
+        #markdown-content table td {
+            border: 1px solid #ff6b35;
+            padding: 12px;
+            text-align: left;
+        }
+
+        #markdown-content table th {
+            background: rgba(255, 107, 53, 0.15);
+            color: #ff6b35;
+            font-weight: 700;
+            text-shadow: 0 0 5px rgba(255, 107, 53, 0.5);
+        }
+
+        #markdown-content table td {
+            color: #ccc;
+        }
+
+        #markdown-content table tr:nth-child(even) {
+            background: rgba(255, 107, 53, 0.05);
+        }
+
+        #markdown-content table tr:hover {
+            background: rgba(255, 107, 53, 0.1);
+        }
+
+        #markdown-content code {
+            background: rgba(0, 0, 0, 0.5);
+            color: #ffb84d;
+            padding: 2px 6px;
+            border: 1px solid rgba(255, 107, 53, 0.3);
+            border-radius: 2px;
+            font-family: 'Courier Prime', monospace;
+            font-size: 0.9em;
+        }
+
+        #markdown-content pre {
+            background: rgba(0, 0, 0, 0.8);
+            border: 1px solid #ff6b35;
+            border-radius: 0;
+            padding: 20px;
+            overflow-x: auto;
+            margin-bottom: 20px;
+            line-height: 1.5;
+            box-shadow: inset 0 0 10px rgba(255, 107, 53, 0.1);
+        }
+
+        #markdown-content pre code {
+            background: none;
+            border: none;
+            padding: 0;
+            color: #ffb84d;
+            font-size: 0.9em;
+            font-family: 'Courier Prime', monospace;
+        }
+
+        #markdown-content blockquote {
+            border-left: 3px solid #ff6b35;
+            padding-left: 20px;
+            margin: 20px 0;
+            color: #888;
+            font-style: italic;
+        }
+
+        #markdown-content a {
+            color: #ffb84d;
+            text-decoration: none;
+            border-bottom: 1px dashed #ffb84d;
+            transition: all 0.2s;
+        }
+
+        #markdown-content a:hover {
+            color: #ff6b35;
+            border-bottom-color: #ff6b35;
+            text-shadow: 0 0 10px rgba(255, 107, 53, 0.5);
+        }
+
+        .toc {
+            background: rgba(255, 107, 53, 0.05);
+            border: 2px solid #ff6b35;
+            padding: 20px;
+            margin-bottom: 40px;
+            box-shadow: inset 0 0 10px rgba(255, 107, 53, 0.1);
+        }
+
+        .toc h3 {
+            margin-top: 0;
+            margin-bottom: 15px;
+            font-size: 1.2em;
+            color: #ff6b35;
+            text-shadow: 0 0 10px rgba(255, 107, 53, 0.3);
+            letter-spacing: 1px;
+        }
+
+        .toc h3::before {
+            content: '┌─ ';
+            margin-right: 5px;
+        }
+
+        .toc h3::after {
+            content: ' ─┐';
+            margin-left: 5px;
+        }
+
+        .toc ul {
+            list-style: none;
+            margin: 0;
+        }
+
+        .toc li {
+            margin: 8px 0;
+        }
+
+        .toc a {
+            color: #ffb84d;
+            text-decoration: none;
+            border-bottom: 1px dotted #ffb84d;
+            transition: all 0.2s;
+        }
+
+        .toc a:hover {
+            color: #ff6b35;
+            border-bottom-color: #ff6b35;
+            text-shadow: 0 0 10px rgba(255, 107, 53, 0.5);
+        }
+
+        .toc > ul > li > a {
+            font-weight: 700;
+            font-size: 1.05em;
+        }
+
+        .toc ul ul {
+            margin-left: 20px;
+            margin-top: 8px;
+        }
+
+        .toc ul ul li::before {
+            content: '→ ';
+            color: #ff6b35;
+            margin-right: 5px;
+        }
+
+        .footer {
+            background: rgba(255, 107, 53, 0.05);
+            border-top: 2px solid #ff6b35;
+            padding: 20px;
+            text-align: center;
+            color: #888;
+            font-size: 0.9em;
+            position: relative;
+            z-index: 3;
+        }
+
+        .footer::before {
+            content: '';
+            display: block;
+            color: #ff6b35;
+            margin-bottom: 10px;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #888;
+            font-size: 1.1em;
+            display: none;
+        }
+
+        .loading.active {
+            display: block;
+        }
+
+        details {
+            margin: 20px 0;
+            padding: 15px;
+            background: rgba(255, 107, 53, 0.05);
+            border: 1px solid #ff6b35;
+            border-radius: 0;
+        }
+
+        details summary {
+            cursor: pointer;
+            font-weight: 700;
+            color: #ffb84d;
+            user-select: none;
+            transition: all 0.2s;
+        }
+
+        details summary::marker {
+            color: #ff6b35;
+        }
+
+        details summary:hover {
+            color: #ff6b35;
+            text-shadow: 0 0 10px rgba(255, 107, 53, 0.5);
+        }
+
+        details > * {
+            margin-top: 10px;
+            color: #ccc;
+        }
+
+        @media (max-width: 768px) {
+            .header {
+                padding: 30px 20px;
+            }
+
+            .header h1 {
+                font-size: 1.8em;
+            }
+
+            .content {
+                padding: 30px 20px;
+            }
+
+            #markdown-content h2 {
+                font-size: 1.5em;
+            }
+
+            #markdown-content table {
+                font-size: 0.85em;
+            }
+
+            #markdown-content table th,
+            #markdown-content table td {
+                padding: 8px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>WEEK 4 ASSIGNMENT</h1>
+            <p>:: BOOK LIBRARY API :: AXUM WEB BACKEND ::</p>
+        </div>
+
+        <div class="content">
+            <div class="loading">[LOADING_ASSIGNMENT_DETAILS...]</div>
+            <div id="markdown-content"></div>
+        </div>
+
+        <div class="footer">
+            WEB3BRIDGE RUST MASTER CLASS — COHORT III
+        </div>
+    </div>
+
+    <script>
+        // Configure marked options
+        marked.setOptions({
+            breaks: true,
+            gfm: true,
+        });
+
+        // Fetch and parse README
+        async function loadMarkdown() {
+            const loadingEl = document.querySelector('.loading');
+            try {
+                const response = await fetch('README.md');
+                if (!response.ok) throw new Error('Failed to load README');
+                const markdown = await response.text();
+                
+                // Parse markdown to HTML
+                const html = marked.parse(markdown);
+                
+                // Insert into DOM and remove loading
+                document.getElementById('markdown-content').innerHTML = html;
+                if (loadingEl) loadingEl.remove();
+
+                // Generate and prepend table of contents
+                generateTableOfContents();
+            } catch (error) {
+                document.getElementById('markdown-content').innerHTML = `
+                    <div style="color: #ff6b35; padding: 20px; background: rgba(255, 107, 53, 0.1); border: 2px solid #ff6b35; border-radius: 0;">
+                        <strong>[ERROR]</strong> Failed to load assignment
+                        <p style="margin-top: 10px; font-size: 0.9em; color: #ccc;">
+                            ${error.message}<br/>
+                            Make sure README.md is in the same directory as this HTML file.
+                        </p>
+                    </div>
+                `;
+                if (loadingEl) loadingEl.remove();
+            }
+        }
+
+        // Generate table of contents from headings
+        function generateTableOfContents() {
+            const headings = document.querySelectorAll('#markdown-content h2, #markdown-content h3');
+            if (headings.length === 0) return;
+
+            const toc = document.createElement('div');
+            toc.className = 'toc';
+            toc.innerHTML = '<h3>NAVIGATION</h3>';
+
+            const ul = document.createElement('ul');
+            let currentLevel = 1;
+            let currentUl = ul;
+            const levelStack = [{ level: 2, ul }];
+
+            headings.forEach((heading, index) => {
+                const level = parseInt(heading.tagName[1]);
+                const text = heading.textContent;
+                const id = `heading-${index}`;
+                heading.id = id;
+
+                const li = document.createElement('li');
+                const a = document.createElement('a');
+                a.href = `#${id}`;
+                a.textContent = text;
+                li.appendChild(a);
+
+                if (level === 2) {
+                    ul.appendChild(li);
+                    levelStack.length = 1;
+                    levelStack.push({ level: 2, ul });
+                } else if (level === 3) {
+                    if (levelStack[levelStack.length - 1].level === 2) {
+                        const subUl = document.createElement('ul');
+                        const lastLi = ul.lastElementChild;
+                        if (lastLi) {
+                            lastLi.appendChild(subUl);
+                        } else {
+                            ul.appendChild(subUl);
+                        }
+                        levelStack.push({ level: 3, ul: subUl });
+                    }
+                    levelStack[levelStack.length - 1].ul.appendChild(li);
+                }
+            });
+
+            const markdownContent = document.getElementById('markdown-content');
+            markdownContent.insertBefore(toc, markdownContent.firstChild);
+        }
+
+        // Load markdown when page loads
+        window.addEventListener('load', loadMarkdown);
+    </script>
+</body>
+</html>
