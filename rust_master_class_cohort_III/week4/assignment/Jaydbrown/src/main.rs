@@ -9,7 +9,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
-    collections::HashMap,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
@@ -19,7 +18,7 @@ use std::{
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Book {
+struct BookDetails {
     id: u64,
     title: String,
     author: String,
@@ -36,7 +35,7 @@ struct NewBook {
 }
 
 #[derive(Debug, Deserialize)]
-struct PutBook {
+struct ReplaceBook {
     title: String,
     author: String,
     genre: String,
@@ -44,7 +43,7 @@ struct PutBook {
 }
 
 #[derive(Debug, Deserialize)]
-struct PatchBook {
+struct UpdateBook {
     title: Option<String>,
     author: Option<String>,
     genre: Option<String>,
@@ -61,36 +60,6 @@ struct FilterParams {
 struct SearchParams {
     q: Option<String>,
     limit: Option<usize>,
-}
-
-fn validate_title(title: &str) -> Result<(), ApiError> {
-    if title.trim().is_empty() {
-        return Err(ApiError::Validation("title must not be empty".to_string()));
-    }
-    if title.chars().count() > 150 {
-        return Err(ApiError::Validation(
-            "title must be at most 150 characters".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_nonempty(field: &str, value: &str) -> Result<(), ApiError> {
-    if value.trim().is_empty() {
-        return Err(ApiError::Validation(format!("{field} must not be empty")));
-    }
-    Ok(())
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -152,6 +121,36 @@ impl IntoResponse for ApiError {
     }
 }
 
+fn validate_title(title: &str) -> Result<(), ApiError> {
+    if title.trim().is_empty() {
+        return Err(ApiError::Validation("title must not be empty".to_string()));
+    }
+    if title.chars().count() > 150 {
+        return Err(ApiError::Validation(
+            "title must be at most 150 characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_nonempty(field: &str, value: &str) -> Result<(), ApiError> {
+    if value.trim().is_empty() {
+        return Err(ApiError::Validation(format!("{field} must not be empty")));
+    }
+    Ok(())
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 fn now_rfc3339() -> String {
     let since_epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -181,211 +180,234 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (year, month, day)
 }
 
-struct Store {
-    books: HashMap<u64, Book>,
+struct Library {
+    books: Vec<BookDetails>,
     next_id: u64,
 }
 
-type SharedStore = Arc<Mutex<Store>>;
-
-fn seed_store() -> Store {
-    let mut books = HashMap::new();
-    books.insert(
-        1,
-        Book {
-            id: 1,
-            title: "The Rust Programming Language".to_string(),
-            author: "Steve Klabnik".to_string(),
-            genre: "Technical".to_string(),
-            available: true,
-            added_at: now_rfc3339(),
-        },
-    );
-    books.insert(
-        2,
-        Book {
-            id: 2,
-            title: "Programming Rust".to_string(),
-            author: "Jim Blandy".to_string(),
-            genre: "Technical".to_string(),
-            available: false,
-            added_at: now_rfc3339(),
-        },
-    );
-    Store { books, next_id: 3 }
-}
-
-async fn list_books(
-    State(store): State<SharedStore>,
-    Query(filter): Query<FilterParams>,
-) -> Result<Json<Vec<Book>>, ApiError> {
-    let guard = store.lock()?;
-    let mut books: Vec<Book> = guard.books.values().cloned().collect();
-    if let Some(genre) = &filter.genre {
-        books.retain(|b| &b.genre == genre);
-    }
-    if let Some(available) = filter.available {
-        books.retain(|b| b.available == available);
-    }
-    books.sort_by_key(|b| b.id);
-    Ok(Json(books))
-}
-
-async fn get_book(
-    State(store): State<SharedStore>,
-    Path(id): Path<u64>,
-) -> Result<Json<Book>, ApiError> {
-    let guard = store.lock()?;
-    guard
-        .books
-        .get(&id)
-        .cloned()
-        .map(Json)
-        .ok_or(ApiError::NotFound(id))
-}
-
-async fn search_books(
-    State(store): State<SharedStore>,
-    Query(params): Query<SearchParams>,
-) -> Result<Json<Vec<Book>>, ApiError> {
-    let guard = store.lock()?;
-    let limit = params.limit.unwrap_or(10);
-    let q = params.q.unwrap_or_default().to_lowercase();
-    let mut books: Vec<Book> = guard
-        .books
-        .values()
-        .filter(|b| b.title.to_lowercase().contains(&q) || b.author.to_lowercase().contains(&q))
-        .cloned()
-        .collect();
-    books.sort_by_key(|b| b.id);
-    books.truncate(limit);
-    Ok(Json(books))
-}
-
-async fn health(State(store): State<SharedStore>) -> Result<Json<serde_json::Value>, ApiError> {
-    let guard = store.lock()?;
-    Ok(Json(json!({ "status": "ok", "books": guard.books.len() })))
-}
-
-async fn create_book(
-    State(store): State<SharedStore>,
-    Json(payload): Json<NewBook>,
-) -> Result<(StatusCode, Json<Book>), ApiError> {
-    validate_title(&payload.title)?;
-    validate_nonempty("author", &payload.author)?;
-    validate_nonempty("genre", &payload.genre)?;
-
-    let mut guard = store.lock()?;
-    if guard.books.values().any(|b| b.title == payload.title) {
-        return Err(ApiError::Conflict(format!(
-            "a book titled '{}' already exists",
-            payload.title
-        )));
-    }
-
-    let id = guard.next_id;
-    guard.next_id += 1;
-    let book = Book {
-        id,
-        title: payload.title,
-        author: payload.author,
-        genre: payload.genre,
-        available: true,
-        added_at: now_rfc3339(),
-    };
-    guard.books.insert(id, book.clone());
-    Ok((StatusCode::CREATED, Json(book)))
-}
-
-async fn put_book(
-    State(store): State<SharedStore>,
-    Path(id): Path<u64>,
-    Json(payload): Json<PutBook>,
-) -> Result<Json<Book>, ApiError> {
-    validate_title(&payload.title)?;
-    validate_nonempty("author", &payload.author)?;
-    validate_nonempty("genre", &payload.genre)?;
-
-    let mut guard = store.lock()?;
-    if guard
-        .books
-        .values()
-        .any(|b| b.id != id && b.title == payload.title)
-    {
-        return Err(ApiError::Conflict(format!(
-            "a book titled '{}' already exists",
-            payload.title
-        )));
-    }
-
-    let added_at = guard
-        .books
-        .get(&id)
-        .map(|b| b.added_at.clone())
-        .ok_or(ApiError::NotFound(id))?;
-
-    let book = Book {
-        id,
-        title: payload.title,
-        author: payload.author,
-        genre: payload.genre,
-        available: payload.available,
-        added_at,
-    };
-    guard.books.insert(id, book.clone());
-    Ok(Json(book))
-}
-
-async fn patch_book(
-    State(store): State<SharedStore>,
-    Path(id): Path<u64>,
-    Json(payload): Json<PatchBook>,
-) -> Result<Json<Book>, ApiError> {
-    if let Some(title) = &payload.title {
-        validate_title(title)?;
-    }
-    if let Some(author) = &payload.author {
-        validate_nonempty("author", author)?;
-    }
-    if let Some(genre) = &payload.genre {
-        validate_nonempty("genre", genre)?;
-    }
-
-    let mut guard = store.lock()?;
-    if let Some(title) = &payload.title {
-        if guard.books.values().any(|b| b.id != id && &b.title == title) {
-            return Err(ApiError::Conflict(format!(
-                "a book titled '{title}' already exists"
-            )));
+impl Library {
+    fn seed() -> Self {
+        Library {
+            books: vec![
+                BookDetails {
+                    id: 1,
+                    title: "The Rust Programming Language".to_string(),
+                    author: "Steve Klabnik".to_string(),
+                    genre: "Technical".to_string(),
+                    available: true,
+                    added_at: now_rfc3339(),
+                },
+                BookDetails {
+                    id: 2,
+                    title: "Programming Rust".to_string(),
+                    author: "Jim Blandy".to_string(),
+                    genre: "Technical".to_string(),
+                    available: false,
+                    added_at: now_rfc3339(),
+                },
+            ],
+            next_id: 3,
         }
     }
 
-    let book = guard.books.get_mut(&id).ok_or(ApiError::NotFound(id))?;
-    if let Some(title) = payload.title {
-        book.title = title;
+    fn add_book(&mut self, new_book: NewBook) -> Result<BookDetails, ApiError> {
+        validate_title(&new_book.title)?;
+        validate_nonempty("author", &new_book.author)?;
+        validate_nonempty("genre", &new_book.genre)?;
+        if self.books.iter().any(|b| b.title == new_book.title) {
+            return Err(ApiError::Conflict(format!(
+                "a book titled '{}' already exists",
+                new_book.title
+            )));
+        }
+
+        let id = self.next_id;
+        self.next_id += 1;
+        let book = BookDetails {
+            id,
+            title: new_book.title,
+            author: new_book.author,
+            genre: new_book.genre,
+            available: true,
+            added_at: now_rfc3339(),
+        };
+        self.books.push(book.clone());
+        Ok(book)
     }
-    if let Some(author) = payload.author {
-        book.author = author;
+
+    fn list_books(&self, filter: &FilterParams) -> Vec<BookDetails> {
+        let mut books: Vec<BookDetails> = self
+            .books
+            .iter()
+            .filter(|b| filter.genre.as_ref().map_or(true, |g| &b.genre == g))
+            .filter(|b| filter.available.map_or(true, |a| b.available == a))
+            .cloned()
+            .collect();
+        books.sort_by_key(|b| b.id);
+        books
     }
-    if let Some(genre) = payload.genre {
-        book.genre = genre;
+
+    fn get_book(&self, id: u64) -> Option<BookDetails> {
+        self.books.iter().find(|b| b.id == id).cloned()
     }
-    if let Some(available) = payload.available {
-        book.available = available;
+
+    fn search_books(&self, params: &SearchParams) -> Vec<BookDetails> {
+        let q = params.q.clone().unwrap_or_default().to_lowercase();
+        let limit = params.limit.unwrap_or(10);
+        let mut books: Vec<BookDetails> = self
+            .books
+            .iter()
+            .filter(|b| b.title.to_lowercase().contains(&q) || b.author.to_lowercase().contains(&q))
+            .cloned()
+            .collect();
+        books.sort_by_key(|b| b.id);
+        books.truncate(limit);
+        books
     }
-    Ok(Json(book.clone()))
+
+    fn replace_book(&mut self, id: u64, replacement: ReplaceBook) -> Result<BookDetails, ApiError> {
+        validate_title(&replacement.title)?;
+        validate_nonempty("author", &replacement.author)?;
+        validate_nonempty("genre", &replacement.genre)?;
+        if self
+            .books
+            .iter()
+            .any(|b| b.id != id && b.title == replacement.title)
+        {
+            return Err(ApiError::Conflict(format!(
+                "a book titled '{}' already exists",
+                replacement.title
+            )));
+        }
+
+        let book = self
+            .books
+            .iter_mut()
+            .find(|b| b.id == id)
+            .ok_or(ApiError::NotFound(id))?;
+        book.title = replacement.title;
+        book.author = replacement.author;
+        book.genre = replacement.genre;
+        book.available = replacement.available;
+        Ok(book.clone())
+    }
+
+    fn update_book(&mut self, id: u64, update: UpdateBook) -> Result<BookDetails, ApiError> {
+        if let Some(title) = &update.title {
+            validate_title(title)?;
+        }
+        if let Some(author) = &update.author {
+            validate_nonempty("author", author)?;
+        }
+        if let Some(genre) = &update.genre {
+            validate_nonempty("genre", genre)?;
+        }
+        if let Some(title) = &update.title {
+            if self.books.iter().any(|b| b.id != id && &b.title == title) {
+                return Err(ApiError::Conflict(format!(
+                    "a book titled '{title}' already exists"
+                )));
+            }
+        }
+
+        let book = self
+            .books
+            .iter_mut()
+            .find(|b| b.id == id)
+            .ok_or(ApiError::NotFound(id))?;
+        if let Some(title) = update.title {
+            book.title = title;
+        }
+        if let Some(author) = update.author {
+            book.author = author;
+        }
+        if let Some(genre) = update.genre {
+            book.genre = genre;
+        }
+        if let Some(available) = update.available {
+            book.available = available;
+        }
+        Ok(book.clone())
+    }
+
+    fn delete_book(&mut self, id: u64) -> Result<(), ApiError> {
+        let pos = self
+            .books
+            .iter()
+            .position(|b| b.id == id)
+            .ok_or(ApiError::NotFound(id))?;
+        self.books.remove(pos);
+        Ok(())
+    }
+}
+
+type SharedLibrary = Arc<Mutex<Library>>;
+
+async fn create_book(
+    State(library): State<SharedLibrary>,
+    Json(new_book): Json<NewBook>,
+) -> Result<(StatusCode, Json<BookDetails>), ApiError> {
+    let mut library = library.lock()?;
+    let book = library.add_book(new_book)?;
+    Ok((StatusCode::CREATED, Json(book)))
+}
+
+async fn list_books(
+    State(library): State<SharedLibrary>,
+    Query(filter): Query<FilterParams>,
+) -> Result<Json<Vec<BookDetails>>, ApiError> {
+    let library = library.lock()?;
+    Ok(Json(library.list_books(&filter)))
+}
+
+async fn get_book(
+    State(library): State<SharedLibrary>,
+    Path(id): Path<u64>,
+) -> Result<Json<BookDetails>, ApiError> {
+    let library = library.lock()?;
+    library.get_book(id).map(Json).ok_or(ApiError::NotFound(id))
+}
+
+async fn search_books(
+    State(library): State<SharedLibrary>,
+    Query(params): Query<SearchParams>,
+) -> Result<Json<Vec<BookDetails>>, ApiError> {
+    let library = library.lock()?;
+    Ok(Json(library.search_books(&params)))
+}
+
+async fn health(State(library): State<SharedLibrary>) -> Result<Json<serde_json::Value>, ApiError> {
+    let library = library.lock()?;
+    Ok(Json(json!({ "status": "ok", "books": library.books.len() })))
+}
+
+async fn replace_book(
+    State(library): State<SharedLibrary>,
+    Path(id): Path<u64>,
+    Json(replacement): Json<ReplaceBook>,
+) -> Result<Json<BookDetails>, ApiError> {
+    let mut library = library.lock()?;
+    let book = library.replace_book(id, replacement)?;
+    Ok(Json(book))
+}
+
+async fn update_book(
+    State(library): State<SharedLibrary>,
+    Path(id): Path<u64>,
+    Json(update): Json<UpdateBook>,
+) -> Result<Json<BookDetails>, ApiError> {
+    let mut library = library.lock()?;
+    let book = library.update_book(id, update)?;
+    Ok(Json(book))
 }
 
 async fn delete_book(
-    State(store): State<SharedStore>,
+    State(library): State<SharedLibrary>,
     Path(id): Path<u64>,
 ) -> Result<StatusCode, ApiError> {
-    let mut guard = store.lock()?;
-    if guard.books.remove(&id).is_some() {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError::NotFound(id))
-    }
+    let mut library = library.lock()?;
+    library.delete_book(id)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn fallback_handler() -> ApiError {
@@ -431,7 +453,7 @@ async fn log_requests(
 
 #[tokio::main]
 async fn main() {
-    let store: SharedStore = Arc::new(Mutex::new(seed_store()));
+    let library: SharedLibrary = Arc::new(Mutex::new(Library::seed()));
     let request_counter = Arc::new(AtomicU64::new(0));
 
     let public_routes = Router::new()
@@ -444,7 +466,7 @@ async fn main() {
         .route("/books", post(create_book))
         .route(
             "/books/{id}",
-            put(put_book).patch(patch_book).delete(delete_book),
+            put(replace_book).patch(update_book).delete(delete_book),
         )
         .route_layer(middleware::from_fn(require_api_key));
 
@@ -452,7 +474,7 @@ async fn main() {
         .merge(write_routes)
         .fallback(fallback_handler)
         .layer(middleware::from_fn_with_state(request_counter, log_requests))
-        .with_state(store);
+        .with_state(library);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     println!("listening on {}", listener.local_addr().unwrap());
