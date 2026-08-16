@@ -215,6 +215,58 @@ fn seed_store() -> Store {
     Store { books, next_id: 3 }
 }
 
+async fn list_books(
+    State(store): State<SharedStore>,
+    Query(filter): Query<FilterParams>,
+) -> Result<Json<Vec<Book>>, ApiError> {
+    let guard = store.lock()?;
+    let mut books: Vec<Book> = guard.books.values().cloned().collect();
+    if let Some(genre) = &filter.genre {
+        books.retain(|b| &b.genre == genre);
+    }
+    if let Some(available) = filter.available {
+        books.retain(|b| b.available == available);
+    }
+    books.sort_by_key(|b| b.id);
+    Ok(Json(books))
+}
+
+async fn get_book(
+    State(store): State<SharedStore>,
+    Path(id): Path<u64>,
+) -> Result<Json<Book>, ApiError> {
+    let guard = store.lock()?;
+    guard
+        .books
+        .get(&id)
+        .cloned()
+        .map(Json)
+        .ok_or(ApiError::NotFound(id))
+}
+
+async fn search_books(
+    State(store): State<SharedStore>,
+    Query(params): Query<SearchParams>,
+) -> Result<Json<Vec<Book>>, ApiError> {
+    let guard = store.lock()?;
+    let limit = params.limit.unwrap_or(10);
+    let q = params.q.unwrap_or_default().to_lowercase();
+    let mut books: Vec<Book> = guard
+        .books
+        .values()
+        .filter(|b| b.title.to_lowercase().contains(&q) || b.author.to_lowercase().contains(&q))
+        .cloned()
+        .collect();
+    books.sort_by_key(|b| b.id);
+    books.truncate(limit);
+    Ok(Json(books))
+}
+
+async fn health(State(store): State<SharedStore>) -> Result<Json<serde_json::Value>, ApiError> {
+    let guard = store.lock()?;
+    Ok(Json(json!({ "status": "ok", "books": guard.books.len() })))
+}
+
 #[tokio::main]
 async fn main() {
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
