@@ -63,6 +63,36 @@ struct SearchParams {
     limit: Option<usize>,
 }
 
+fn validate_title(title: &str) -> Result<(), ApiError> {
+    if title.trim().is_empty() {
+        return Err(ApiError::Validation("title must not be empty".to_string()));
+    }
+    if title.chars().count() > 150 {
+        return Err(ApiError::Validation(
+            "title must be at most 150 characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_nonempty(field: &str, value: &str) -> Result<(), ApiError> {
+    if value.trim().is_empty() {
+        return Err(ApiError::Validation(format!("{field} must not be empty")));
+    }
+    Ok(())
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 #[derive(Debug, thiserror::Error)]
 enum ApiError {
     #[error("book {0} not found")]
