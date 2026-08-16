@@ -17,6 +17,52 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Book {
+    id: u64,
+    title: String,
+    author: String,
+    genre: String,
+    available: bool,
+    added_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct NewBook {
+    title: String,
+    author: String,
+    genre: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PutBook {
+    title: String,
+    author: String,
+    genre: String,
+    available: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchBook {
+    title: Option<String>,
+    author: Option<String>,
+    genre: Option<String>,
+    available: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FilterParams {
+    genre: Option<String>,
+    available: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchParams {
+    q: Option<String>,
+    limit: Option<usize>,
+}
+
 #[tokio::main]
 async fn main() {
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
