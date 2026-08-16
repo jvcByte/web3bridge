@@ -63,6 +63,40 @@ struct SearchParams {
     limit: Option<usize>,
 }
 
+struct Store {
+    books: HashMap<u64, Book>,
+    next_id: u64,
+}
+
+type SharedStore = Arc<Mutex<Store>>;
+
+fn seed_store() -> Store {
+    let mut books = HashMap::new();
+    books.insert(
+        1,
+        Book {
+            id: 1,
+            title: "The Rust Programming Language".to_string(),
+            author: "Steve Klabnik".to_string(),
+            genre: "Technical".to_string(),
+            available: true,
+            added_at: now_rfc3339(),
+        },
+    );
+    books.insert(
+        2,
+        Book {
+            id: 2,
+            title: "Programming Rust".to_string(),
+            author: "Jim Blandy".to_string(),
+            genre: "Technical".to_string(),
+            available: false,
+            added_at: now_rfc3339(),
+        },
+    );
+    Store { books, next_id: 3 }
+}
+
 #[tokio::main]
 async fn main() {
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
