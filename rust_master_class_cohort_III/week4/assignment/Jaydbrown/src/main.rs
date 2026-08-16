@@ -392,8 +392,69 @@ async fn fallback_handler() -> ApiError {
     ApiError::RouteNotFound
 }
 
+async fn require_api_key(headers: HeaderMap, req: Request, next: Next) -> Result<Response, ApiError> {
+    let expected = std::env::var("API_KEY").unwrap_or_else(|_| "dev-secret-key".to_string());
+    let provided = headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
+        Ok(next.run(req).await)
+    } else {
+        Err(ApiError::Unauthorized)
+    }
+}
+
+async fn log_requests(
+    State(counter): State<Arc<AtomicU64>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let start = Instant::now();
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+
+    let response = next.run(req).await;
+
+    let elapsed = start.elapsed();
+    println!(
+        "[req {n:>4}] {:<7}{:<25} -> {} ({:.2}ms)",
+        method.as_str(),
+        path,
+        response.status().as_u16(),
+        elapsed.as_secs_f64() * 1000.0
+    );
+
+    response
+}
+
 #[tokio::main]
 async fn main() {
+    let store: SharedStore = Arc::new(Mutex::new(seed_store()));
+    let request_counter = Arc::new(AtomicU64::new(0));
+
+    let public_routes = Router::new()
+        .route("/books", get(list_books))
+        .route("/books/{id}", get(get_book))
+        .route("/search", get(search_books))
+        .route("/health", get(health));
+
+    let write_routes = Router::new()
+        .route("/books", post(create_book))
+        .route(
+            "/books/{id}",
+            put(put_book).patch(patch_book).delete(delete_book),
+        )
+        .route_layer(middleware::from_fn(require_api_key));
+
+    let app = public_routes
+        .merge(write_routes)
+        .fallback(fallback_handler)
+        .layer(middleware::from_fn_with_state(request_counter, log_requests))
+        .with_state(store);
+
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     println!("listening on {}", listener.local_addr().unwrap());
+    axum::serve(listener, app).await.unwrap();
 }
