@@ -63,6 +63,65 @@ struct SearchParams {
     limit: Option<usize>,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum ApiError {
+    #[error("book {0} not found")]
+    NotFound(u64),
+    #[error("route not found")]
+    RouteNotFound,
+    #[error("{0}")]
+    Validation(String),
+    #[error("unauthorized")]
+    Unauthorized,
+    #[error("{0}")]
+    Conflict(String),
+    #[error("internal error")]
+    Internal(String),
+}
+
+impl<T> From<std::sync::PoisonError<T>> for ApiError {
+    fn from(_: std::sync::PoisonError<T>) -> Self {
+        ApiError::Internal("shared state lock was poisoned".to_string())
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let (status, kind, message) = match self {
+            ApiError::NotFound(id) => (
+                StatusCode::NOT_FOUND,
+                "not_found",
+                format!("book {id} not found"),
+            ),
+            ApiError::RouteNotFound => (
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "route not found".to_string(),
+            ),
+            ApiError::Validation(message) => (StatusCode::BAD_REQUEST, "validation_failed", message),
+            ApiError::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "missing or invalid API key".to_string(),
+            ),
+            ApiError::Conflict(message) => (StatusCode::CONFLICT, "conflict", message),
+            ApiError::Internal(message) => {
+                eprintln!("internal error: {message}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "internal server error".to_string(),
+                )
+            }
+        };
+
+        let body = Json(json!({
+            "error": { "kind": kind, "message": message }
+        }));
+        (status, body).into_response()
+    }
+}
+
 fn now_rfc3339() -> String {
     let since_epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
