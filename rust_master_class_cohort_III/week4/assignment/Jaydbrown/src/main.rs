@@ -267,6 +267,131 @@ async fn health(State(store): State<SharedStore>) -> Result<Json<serde_json::Val
     Ok(Json(json!({ "status": "ok", "books": guard.books.len() })))
 }
 
+async fn create_book(
+    State(store): State<SharedStore>,
+    Json(payload): Json<NewBook>,
+) -> Result<(StatusCode, Json<Book>), ApiError> {
+    validate_title(&payload.title)?;
+    validate_nonempty("author", &payload.author)?;
+    validate_nonempty("genre", &payload.genre)?;
+
+    let mut guard = store.lock()?;
+    if guard.books.values().any(|b| b.title == payload.title) {
+        return Err(ApiError::Conflict(format!(
+            "a book titled '{}' already exists",
+            payload.title
+        )));
+    }
+
+    let id = guard.next_id;
+    guard.next_id += 1;
+    let book = Book {
+        id,
+        title: payload.title,
+        author: payload.author,
+        genre: payload.genre,
+        available: true,
+        added_at: now_rfc3339(),
+    };
+    guard.books.insert(id, book.clone());
+    Ok((StatusCode::CREATED, Json(book)))
+}
+
+async fn put_book(
+    State(store): State<SharedStore>,
+    Path(id): Path<u64>,
+    Json(payload): Json<PutBook>,
+) -> Result<Json<Book>, ApiError> {
+    validate_title(&payload.title)?;
+    validate_nonempty("author", &payload.author)?;
+    validate_nonempty("genre", &payload.genre)?;
+
+    let mut guard = store.lock()?;
+    if guard
+        .books
+        .values()
+        .any(|b| b.id != id && b.title == payload.title)
+    {
+        return Err(ApiError::Conflict(format!(
+            "a book titled '{}' already exists",
+            payload.title
+        )));
+    }
+
+    let added_at = guard
+        .books
+        .get(&id)
+        .map(|b| b.added_at.clone())
+        .ok_or(ApiError::NotFound(id))?;
+
+    let book = Book {
+        id,
+        title: payload.title,
+        author: payload.author,
+        genre: payload.genre,
+        available: payload.available,
+        added_at,
+    };
+    guard.books.insert(id, book.clone());
+    Ok(Json(book))
+}
+
+async fn patch_book(
+    State(store): State<SharedStore>,
+    Path(id): Path<u64>,
+    Json(payload): Json<PatchBook>,
+) -> Result<Json<Book>, ApiError> {
+    if let Some(title) = &payload.title {
+        validate_title(title)?;
+    }
+    if let Some(author) = &payload.author {
+        validate_nonempty("author", author)?;
+    }
+    if let Some(genre) = &payload.genre {
+        validate_nonempty("genre", genre)?;
+    }
+
+    let mut guard = store.lock()?;
+    if let Some(title) = &payload.title {
+        if guard.books.values().any(|b| b.id != id && &b.title == title) {
+            return Err(ApiError::Conflict(format!(
+                "a book titled '{title}' already exists"
+            )));
+        }
+    }
+
+    let book = guard.books.get_mut(&id).ok_or(ApiError::NotFound(id))?;
+    if let Some(title) = payload.title {
+        book.title = title;
+    }
+    if let Some(author) = payload.author {
+        book.author = author;
+    }
+    if let Some(genre) = payload.genre {
+        book.genre = genre;
+    }
+    if let Some(available) = payload.available {
+        book.available = available;
+    }
+    Ok(Json(book.clone()))
+}
+
+async fn delete_book(
+    State(store): State<SharedStore>,
+    Path(id): Path<u64>,
+) -> Result<StatusCode, ApiError> {
+    let mut guard = store.lock()?;
+    if guard.books.remove(&id).is_some() {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound(id))
+    }
+}
+
+async fn fallback_handler() -> ApiError {
+    ApiError::RouteNotFound
+}
+
 #[tokio::main]
 async fn main() {
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
