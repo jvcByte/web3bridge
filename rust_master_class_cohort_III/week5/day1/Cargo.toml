@@ -1,8 +1,10 @@
 [package]
-name = "day1-blocking-echo"
+name = "day1-ws-echo"
 version = "0.1.0"
 edition = "2021"
 
-# No dependencies. Today is std::net only — the whole point is to feel what
-# blocking I/O costs before tokio takes the pain away tomorrow.
 [dependencies]
+axum      = { version = "0.8", features = ["ws"] }
+tokio     = { version = "1",   features = ["full"] }
+serde     = { version = "1",   features = ["derive"] }
+serde_json = "1"

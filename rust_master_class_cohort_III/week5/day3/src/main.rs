@@ -1,262 +1,264 @@
-//! Week 5 · Day 3 — Framing & Protocol Design
+//! Week 5 · Day 3 — Nicknames & JSON messages
 //!
-//!   cargo run -- broken      # reproduce the naive-framing bug on purpose
-//!   cargo run -- lines       # LinesCodec — delimiter framing done properly
-//!   cargo run -- length      # the hand-rolled length-prefix codec over a socket
-//!   cargo run -- protocol    # the command protocol, parsed round-trip
-//!   cargo test               # 22 tests covering both codecs and the parser
+//! Adds named users and structured JSON messages to Day 2's broadcast server.
+//!
+//!   cargo run
+//!   open http://localhost:3000, enter a name, chat
 
-mod framing;
-mod protocol;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use std::time::Duration;
+use axum::{
+    extract::{
+        State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
+    response::{Html, IntoResponse},
+    routing::get,
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use tokio::sync::broadcast::{self, error::RecvError};
 
-use futures::{SinkExt, StreamExt};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio_util::codec::{Framed, LinesCodec};
+const CHANNEL_CAPACITY: usize = 64;
 
-use framing::LengthPrefixed;
-use protocol::{Command, Event, MAX_LINE};
+// ---------------------------------------------------------------------------
+// Message types
+// ---------------------------------------------------------------------------
+
+/// Messages the client sends to the server.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum ClientMsg {
+    Join    { name: String },
+    Message { text: String },
+    Leave,
+}
+
+/// Messages the server sends to clients (broadcast as JSON strings).
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum ServerMsg<'a> {
+    Joined  { name: &'a str, online: usize },
+    Left    { name: &'a str, online: usize },
+    Message { name: &'a str, text: &'a str },
+    Error   { text: &'a str },
+}
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+struct AppState {
+    tx:    broadcast::Sender<String>,
+    names: Mutex<HashSet<String>>,
+    count: AtomicUsize,
+}
 
 #[tokio::main]
 async fn main() {
-    let mode = std::env::args().nth(1).unwrap_or_else(|| "broken".into());
-
-    match mode.as_str() {
-        "broken" => demo_broken().await,
-        "lines" => demo_lines().await,
-        "length" => demo_length().await,
-        "protocol" => demo_protocol(),
-        other => {
-            eprintln!("unknown mode {other:?}; try: broken | lines | length | protocol");
-            std::process::exit(1);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 1. The bug, reproduced deliberately.
-// ---------------------------------------------------------------------------
-
-/// Naive framing — "one read is one message" — with a sender that splits a
-/// message across two writes.
-///
-/// On loopback with small payloads this usually appears to work, which is exactly
-/// what makes it dangerous: it passes local testing and fails in production. So
-/// this forces the failure with an explicit delay between writes.
-async fn demo_broken() {
-    println!("=== 1. Naive framing: one read == one message ===\n");
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-
-    let server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let mut buf = [0u8; 512];
-        let mut received = Vec::new();
-
-        loop {
-            match stream.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => {
-                    // THE BUG: treating each read as exactly one message.
-                    let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
-                    println!("  server read {n:>3} bytes -> treated as one message: {chunk:?}");
-                    received.push(chunk);
-                }
-                Err(_) => break,
-            }
-        }
-
-        received
+    let (tx, _) = broadcast::channel(CHANNEL_CAPACITY);
+    let state = Arc::new(AppState {
+        tx,
+        names: Mutex::new(HashSet::new()),
+        count: AtomicUsize::new(0),
     });
 
-    let mut client = TcpStream::connect(addr).await.unwrap();
+    let app = Router::new()
+        .route("/", get(index))
+        .route("/health", get(health))
+        .route("/ws", get(ws_handler))
+        .with_state(state);
 
-    // One logical message, split across two writes with a pause. TCP delivers
-    // the bytes correctly; the reader's assumption is what breaks.
-    println!("  client writes \"hel\", pauses 150ms, writes \"lo\\n\"");
-    client.write_all(b"hel").await.unwrap();
-    client.flush().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    client.write_all(b"lo\n").await.unwrap();
-    client.flush().await.unwrap();
-
-    tokio::time::sleep(Duration::from_millis(150)).await;
-
-    // Three logical messages in a single write.
-    println!("  client writes \"one\\ntwo\\nthree\\n\" in ONE write");
-    client.write_all(b"one\ntwo\nthree\n").await.unwrap();
-    client.flush().await.unwrap();
-
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    drop(client);
-
-    let received = server.await.unwrap();
-
-    println!("\n  the server saw {} \"messages\":", received.len());
-    for (i, msg) in received.iter().enumerate() {
-        println!("    {i}: {msg:?}");
-    }
-    println!("\n  It should have seen 4: \"hello\", \"one\", \"two\", \"three\".");
-    println!("  One message arrived split; three arrived merged. Both are correct TCP.");
-    println!("  The reader's assumption is the bug — and it is invisible on a fast");
-    println!("  local link with small payloads, which is why it ships.\n");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await.unwrap();
+    println!("listening on http://127.0.0.1:3000");
+    axum::serve(listener, app).await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
-// 2. LinesCodec — delimiter framing.
+// Handlers
 // ---------------------------------------------------------------------------
 
-/// The same traffic, through `Framed` + `LinesCodec`.
-///
-/// `Framed` turns the socket into a `Stream` of `String`s and a `Sink` you can
-/// push `String`s into. Reassembly stops being your problem.
-async fn demo_lines() {
-    println!("=== 2. LinesCodec: delimiter framing ===\n");
+async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(json!({
+        "status": "ok",
+        "connected": state.count.load(Ordering::Relaxed)
+    }))
+}
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+async fn index() -> Html<&'static str> {
+    Html(HTML)
+}
 
-    let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_socket(socket, state))
+}
 
-        // `new_with_max_length`, never bare `new()`, on anything a stranger can
-        // connect to: a peer that never sends a newline would otherwise make the
-        // codec buffer until the process dies.
-        let mut framed = Framed::new(stream, LinesCodec::new_with_max_length(MAX_LINE));
+// ---------------------------------------------------------------------------
+// Per-connection logic
+// ---------------------------------------------------------------------------
 
-        let mut received = Vec::new();
-        while let Some(result) = framed.next().await {
-            match result {
-                Ok(line) => {
-                    println!("  server got one complete line: {line:?}");
-                    received.push(line);
+async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
+    let mut rx = state.tx.subscribe();
+    // The client's chosen name — None until a Join message arrives.
+    let mut my_name: Option<String> = None;
+
+    loop {
+        tokio::select! {
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(Message::Text(raw))) => {
+                        handle_client_msg(&raw, &mut my_name, &mut socket, &state).await;
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {}
                 }
-                Err(e) => {
-                    // A protocol error, not a connection error. The socket is
-                    // still healthy — for a chat server the right move is to tell
-                    // the client and keep going, not to disconnect them.
-                    println!("  codec error (connection still fine): {e}");
+            }
+
+            broadcast = rx.recv() => {
+                match broadcast {
+                    Ok(json) => {
+                        if socket.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(RecvError::Lagged(n)) => {
+                        let warn = serde_json::to_string(&ServerMsg::Error {
+                            text: &format!("you missed {n} messages"),
+                        }).unwrap();
+                        if socket.send(Message::Text(warn.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(RecvError::Closed) => break,
                 }
             }
         }
-        received
-    });
+    }
 
-    let mut client = TcpStream::connect(addr).await.unwrap();
-
-    println!("  client writes exactly the same bytes as demo 1");
-    client.write_all(b"hel").await.unwrap();
-    client.flush().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    client.write_all(b"lo\n").await.unwrap();
-    client.write_all(b"one\ntwo\nthree\n").await.unwrap();
-    client.flush().await.unwrap();
-
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    drop(client);
-
-    let received = server.await.unwrap();
-
-    println!("\n  the server saw {} messages: {received:?}", received.len());
-    println!("  Split writes reassembled, merged writes separated. Same bytes,");
-    println!("  correct framing.\n");
+    // Clean up on disconnect.
+    if let Some(name) = my_name.take() {
+        state.names.lock().unwrap().remove(&name);
+        let n = state.count.fetch_sub(1, Ordering::Relaxed) - 1;
+        let msg = serde_json::to_string(&ServerMsg::Left { name: &name, online: n }).unwrap();
+        let _ = state.tx.send(msg);
+    }
 }
 
-// ---------------------------------------------------------------------------
-// 3. The hand-rolled length-prefix codec, over a real socket.
-// ---------------------------------------------------------------------------
+/// Handles one parsed message from the client.
+async fn handle_client_msg(
+    raw: &str,
+    my_name: &mut Option<String>,
+    socket: &mut WebSocket,
+    state: &Arc<AppState>,
+) {
+    let Ok(msg) = serde_json::from_str::<ClientMsg>(raw) else {
+        let err = serde_json::to_string(&ServerMsg::Error { text: "invalid JSON" }).unwrap();
+        let _ = socket.send(Message::Text(err.into())).await;
+        return;
+    };
 
-async fn demo_length() {
-    println!("=== 3. Length-prefix framing (hand-rolled Decoder/Encoder) ===\n");
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-
-    let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut framed = Framed::new(stream, LengthPrefixed);
-
-        let mut received = Vec::new();
-        while let Some(result) = framed.next().await {
-            match result {
-                Ok(msg) => {
-                    println!("  server got a {}-byte frame: {msg:?}", msg.len());
-                    received.push(msg);
-                }
-                Err(e) => println!("  frame error: {e}"),
+    match msg {
+        ClientMsg::Join { name } => {
+            if name.is_empty() || name.len() > 20 {
+                let err = serde_json::to_string(&ServerMsg::Error {
+                    text: "name must be 1–20 characters",
+                }).unwrap();
+                let _ = socket.send(Message::Text(err.into())).await;
+                return;
             }
+
+            // Check-and-insert under one lock so two simultaneous joins cannot
+            // both see the name as free.
+            let taken = {
+                let mut names = state.names.lock().unwrap();
+                if names.contains(&name) {
+                    true
+                } else {
+                    names.insert(name.clone());
+                    false
+                }
+            };
+
+            if taken {
+                let err = serde_json::to_string(&ServerMsg::Error {
+                    text: "name already taken",
+                }).unwrap();
+                let _ = socket.send(Message::Text(err.into())).await;
+                return;
+            }
+
+            let n = state.count.fetch_add(1, Ordering::Relaxed) + 1;
+            *my_name = Some(name.clone());
+
+            let msg = serde_json::to_string(&ServerMsg::Joined { name: &name, online: n }).unwrap();
+            let _ = state.tx.send(msg);
         }
-        received
-    });
 
-    let stream = TcpStream::connect(addr).await.unwrap();
-    let mut framed = Framed::new(stream, LengthPrefixed);
+        ClientMsg::Message { text } => {
+            let Some(name) = my_name.as_deref() else {
+                let err = serde_json::to_string(&ServerMsg::Error {
+                    text: "send /join first",
+                }).unwrap();
+                let _ = socket.send(Message::Text(err.into())).await;
+                return;
+            };
 
-    framed.send("hello".to_string()).await.unwrap();
+            let msg = serde_json::to_string(&ServerMsg::Message { name, text: &text }).unwrap();
+            let _ = state.tx.send(msg);
+        }
 
-    // The payoff over delimiter framing: the content can contain the byte a line
-    // protocol would frame on, with no escaping.
-    framed
-        .send("a message\nwith embedded\nnewlines".to_string())
-        .await
-        .unwrap();
-
-    framed.send(String::new()).await.unwrap();
-
-    drop(framed);
-    tokio::time::sleep(Duration::from_millis(150)).await;
-
-    let received = server.await.unwrap();
-    println!("\n  {} frames received intact, newlines and all.", received.len());
-    println!("  No escaping needed — the length says where each frame ends.\n");
+        ClientMsg::Leave => {}
+    }
 }
 
 // ---------------------------------------------------------------------------
-// 4. The command protocol.
+// Inline HTML
 // ---------------------------------------------------------------------------
 
-/// Parses a representative set of inputs, including the ones that should fail.
-/// The error cases matter more than the happy path — that is where student
-/// implementations usually panic.
-fn demo_protocol() {
-    println!("=== 4. The chat command protocol ===\n");
-
-    let inputs = [
-        "hello everyone",
-        "/nick alice",
-        "/join rust",
-        "/msg bob hello there    friend",
-        "/who",
-        "/rooms",
-        "/quit",
-        "",
-        "/nick",
-        "/nick alice smith",
-        "/nick *admin",
-        "/msg bob",
-        "/dance",
-    ];
-
-    for input in inputs {
-        match Command::parse(input) {
-            Ok(cmd) => println!("  {input:<32} -> {cmd:?}"),
-            Err(e) => println!("  {input:<32} -> error: {e}"),
-        }
-    }
-
-    println!("\n  Server -> client wire format:");
-    for event in [
-        Event::notice("alice joined #rust"),
-        Event::error("unknown command"),
-        Event::Message { from: "alice".into(), text: "hi all".into() },
-        Event::Private { from: "bob".into(), text: "psst".into() },
-    ] {
-        println!("    {event}");
-    }
-
-    println!("\n  Each prefix is unambiguous because nicknames may not start with");
-    println!("  * ! [ or / — which is why `validate_nick` rejects them.\n");
-}
+const HTML: &str = r#"<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Chat — Day 3</title></head>
+<body>
+<h2>Chat Room — Day 3</h2>
+<div id="login">
+  <input id="name" placeholder="your name" style="width:200px">
+  <button onclick="join()">Join</button>
+</div>
+<div id="chat" style="display:none">
+  <input id="msg" placeholder="message" style="width:300px">
+  <button onclick="send()">Send</button>
+</div>
+<ul id="log" style="font-family:monospace"></ul>
+<script>
+  const ws = new WebSocket("ws://localhost:3000/ws");
+  ws.onmessage = e => {
+    const data = JSON.parse(e.data);
+    const li = document.createElement("li");
+    if (data.type === "message")  li.textContent = data.name + ": " + data.text;
+    else if (data.type === "error") li.textContent = "! " + data.text;
+    else li.textContent = "* " + JSON.stringify(data);
+    document.getElementById("log").prepend(li);
+  };
+  function join() {
+    const name = document.getElementById("name").value;
+    ws.send(JSON.stringify({ type: "join", name }));
+    document.getElementById("login").style.display = "none";
+    document.getElementById("chat").style.display = "block";
+  }
+  function send() {
+    const el = document.getElementById("msg");
+    ws.send(JSON.stringify({ type: "message", text: el.value }));
+    el.value = "";
+  }
+  document.getElementById("msg")?.addEventListener("keydown", e => {
+    if (e.key === "Enter") send();
+  });
+</script>
+</body>
+</html>"#;
